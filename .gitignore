@@ -1,0 +1,10 @@
+# Local/editor cruft
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Never commit runtime config or logs
+pmau.conf
+*.log
