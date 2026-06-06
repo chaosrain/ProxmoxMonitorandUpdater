@@ -603,9 +603,16 @@ marked experimental — expect to tweak. Continue?" 12 72 || return 0
   local host_ip; host_ip="$(hostname -I | awk '{print $1}')"
   pveum user add pmau-exporter@pve --comment "PMAU Prometheus exporter (read-only)" >/dev/null 2>&1 || true
   pveum acl modify / -user pmau-exporter@pve -role PVEAuditor >/dev/null 2>&1 || true
-  local tok; tok="$(pveum user token add pmau-exporter@pve prometheus --privsep 0 --output-format json 2>/dev/null | grep -oE '"value"[: ]+"[^"]+"' | sed -E 's/.*"value"[: ]+"([^"]+)".*/\1/')"
-  [[ -n "$tok" ]] || msg_warn "Token may already exist; recreate with: pveum user token remove pmau-exporter@pve prometheus"
-  msg_ok "PVE token ready"
+  # Recreate the token so we always capture the secret (shown once). The
+  # '|| true' guards keep set -e from aborting if parsing misses.
+  pveum user token remove pmau-exporter@pve prometheus >/dev/null 2>&1 || true
+  local tok=""
+  tok="$(pveum user token add pmau-exporter@pve prometheus --privsep 0 --output-format json 2>/dev/null | grep -oE '"value"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*:[[:space:]]*"([^"]+)".*/\1/')" || true
+  if [[ -z "$tok" ]]; then
+    msg_warn "Could not capture exporter token automatically; you'll set token_value in CT ${PROM_CTID}:/etc/prometheus/pve.yml manually."
+  else
+    msg_ok "PVE token ready"
+  fi
 
   msg_info "Installing exporter + Prometheus + Grafana in CT ${PROM_CTID}"
   pct exec "${PROM_CTID}" -- bash -c "
