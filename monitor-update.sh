@@ -95,6 +95,7 @@ SNAPSHOT_KEEP="${SNAPSHOT_KEEP:-2}"
 APP_UPDATES="${APP_UPDATES:-no}"
 PROM_CTID="${PROM_CTID:-201}"
 PROM_IP="${PROM_IP:-}"
+PROM_MAC="${PROM_MAC:-bc:24:11:05:27:e4}"
 BESZEL_IP="${BESZEL_IP:-}"
 EOF
   chmod 600 "${PMAU_CONF}"
@@ -583,11 +584,14 @@ marked experimental — expect to tweak. Continue?" 12 72 || return 0
   [[ -n "$tmpl" ]] || die "No debian-13-standard template available."
   pveam list "${PMAU_TMPL_STORAGE}" 2>/dev/null | grep -q "$tmpl" || pveam download "${PMAU_TMPL_STORAGE}" "$tmpl" >/dev/null 2>&1 || die "Template download failed."
 
-  msg_info "Creating CT ${PROM_CTID} (prometheus-grafana)"
+  PROM_MAC="${PROM_MAC:-bc:24:11:05:27:e4}"  # UCG reservation -> 10.0.0.53
+  local netcfg="name=eth0,bridge=${PMAU_BRIDGE},ip=dhcp"
+  [[ -n "${PROM_MAC}" ]] && netcfg="name=eth0,bridge=${PMAU_BRIDGE},hwaddr=${PROM_MAC},ip=dhcp"
+  msg_info "Creating CT ${PROM_CTID} (prometheus-grafana, MAC ${PROM_MAC})"
   pct create "${PROM_CTID}" "${PMAU_TMPL_STORAGE}:vztmpl/${tmpl}" \
     --hostname prom-grafana --cores 2 --memory 2048 --swap 512 \
     --rootfs "${PMAU_STORAGE}:12" --unprivileged 1 --features nesting=0 \
-    --net0 "name=eth0,bridge=${PMAU_BRIDGE},ip=dhcp" --onboot 1 --start 1 \
+    --net0 "${netcfg}" --onboot 1 --start 1 \
     --tags "pmau,monitoring" >/dev/null 2>&1 || die "pct create ${PROM_CTID} failed."
   sleep 5
   local t=0
