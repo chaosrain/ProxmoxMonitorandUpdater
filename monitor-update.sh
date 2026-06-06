@@ -608,7 +608,7 @@ marked experimental — expect to tweak. Continue?" 12 72 || return 0
     set -e
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq python3-venv python3-pip prometheus apt-transport-https software-properties-common wget gpg curl >/dev/null
+    apt-get install -y -qq python3-venv python3-pip apt-transport-https software-properties-common wget gpg curl tar >/dev/null
     python3 -m venv /opt/pve-exporter
     /opt/pve-exporter/bin/pip -q install --upgrade pip prometheus-pve-exporter >/dev/null
     mkdir -p /etc/prometheus
@@ -632,6 +632,26 @@ WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
     systemctl enable --now prometheus-pve-exporter >/dev/null 2>&1
+    # Prometheus from upstream binary (Debian's apt package is being autoremoved)
+    PVER=\$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/prometheus/prometheus/releases/latest | sed -E 's#.*/v##')
+    curl -fsSL \"https://github.com/prometheus/prometheus/releases/download/v\${PVER}/prometheus-\${PVER}.linux-amd64.tar.gz\" -o /tmp/prom.tgz
+    tar -xzf /tmp/prom.tgz -C /tmp
+    install -m755 /tmp/prometheus-\${PVER}.linux-amd64/prometheus /usr/local/bin/prometheus
+    install -m755 /tmp/prometheus-\${PVER}.linux-amd64/promtool  /usr/local/bin/promtool
+    id prometheus >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin prometheus
+    mkdir -p /etc/prometheus /var/lib/prometheus
+    chown -R prometheus:prometheus /var/lib/prometheus
+    cat > /etc/systemd/system/prometheus.service <<UNIT2
+[Unit]
+Description=Prometheus
+After=network-online.target
+[Service]
+User=prometheus
+ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT2
     cat > /etc/prometheus/prometheus.yml <<CFG
 global:
   scrape_interval: 30s
@@ -650,7 +670,9 @@ scrape_configs:
       - target_label: __address__
         replacement: 127.0.0.1:9221
 CFG
-    systemctl restart prometheus >/dev/null 2>&1 || true
+    chown -R prometheus:prometheus /etc/prometheus
+    systemctl daemon-reload
+    systemctl enable --now prometheus >/dev/null 2>&1 || true
     mkdir -p /etc/apt/keyrings
     wget -qO- https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
     echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main' > /etc/apt/sources.list.d/grafana.list
