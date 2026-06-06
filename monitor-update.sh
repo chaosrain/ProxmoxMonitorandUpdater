@@ -93,6 +93,10 @@ NTFY_URL="${NTFY_URL:-}"
 NTFY_TOPIC="${NTFY_TOPIC:-}"
 NTFY_TOKEN="${NTFY_TOKEN:-}"
 UPDATE_HOST_AUTO="${UPDATE_HOST_AUTO:-no}"
+PULSE_ADMIN_USER="${PULSE_ADMIN_USER:-}"
+PULSE_ADMIN_PASS="${PULSE_ADMIN_PASS:-}"
+PULSE_API_TOKEN="${PULSE_API_TOKEN:-}"
+PMAU_PULSE_IP="${PMAU_PULSE_IP:-}"
 EOF
   chmod 600 "${PMAU_CONF}"
 }
@@ -202,18 +206,115 @@ install_pulse() {
   local ip
   ip="$(pct exec "${PMAU_CTID}" -- bash -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '[:space:]')"
   PMAU_PULSE_IP="${ip}"
+  save_conf
 
-  whiptail --title "$APP" --msgbox \
-"Pulse is installed in CT ${PMAU_CTID}.
+  # Wait for the Pulse API to answer before attempting auto-registration.
+  local t=0
+  until curl -fsS "http://${ip}:${PULSE_PORT}/api/health" >/dev/null 2>&1 || [[ $t -ge 20 ]]; do
+    sleep 2; t=$((t+1))
+  done
 
-Open the dashboard at:
+  if register_node; then
+    whiptail --title "$APP" --msgbox \
+"Pulse is installed in CT ${PMAU_CTID} and this host is auto-registered.
 
-    http://${ip}:${PULSE_PORT}
+Dashboard : http://${ip}:${PULSE_PORT}
+Login     : ${PULSE_ADMIN_USER}  (password saved in ${PMAU_CONF})
 
-Then, in Pulse > Settings, add this Proxmox node using a READ-ONLY API token
-(Datacenter > Permissions > API Tokens). Do not give Pulse root.
+The Proxmox node was registered with a READ-ONLY token created by Pulse's
+own setup script — no root credentials were stored. Open the dashboard and
+your node should already be reporting." 17 72
+  else
+    whiptail --title "$APP" --msgbox \
+"Pulse is installed in CT ${PMAU_CTID}, but automatic node registration did
+not complete. Finish it from the UI:
 
-Pulse self-updates from its Settings page once configured." 18 70
+  1. Open  http://${ip}:${PULSE_PORT}
+  2. Unlock with the bootstrap token:
+       pct exec ${PMAU_CTID} -- cat /etc/pulse/.bootstrap_token
+  3. Settings > Nodes: your host should be auto-discovered. Click it and run
+     the generated setup script on this host (creates a READ-ONLY token).
+
+Do not give Pulse root." 18 74
+  fi
+}
+
+# ---------------------------------------------------------------------------- #
+#  Auto-register THIS Proxmox host into Pulse (read-only, no root stored)
+#  Flow: bootstrap token -> quick-setup (admin + API token)
+#        -> setup-script-url (one-time token) -> run setup-script on host.
+#  Returns non-zero on any failure so the caller can show manual steps.
+# ---------------------------------------------------------------------------- #
+register_node() {
+  local ip="${PMAU_PULSE_IP}"
+  [[ -n "$ip" ]] || { msg_warn "No Pulse IP known; skipping auto-register"; return 1; }
+  local base="http://${ip}:${PULSE_PORT}"
+
+  command -v jq      >/dev/null 2>&1 || apt-get install -y -qq jq      >/dev/null 2>&1 || true
+  command -v openssl >/dev/null 2>&1 || apt-get install -y -qq openssl >/dev/null 2>&1 || true
+  command -v jq >/dev/null 2>&1 || { msg_warn "jq unavailable; cannot parse Pulse API"; return 1; }
+
+  local bt
+  bt="$(pct exec "${PMAU_CTID}" -- cat /etc/pulse/.bootstrap_token 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$bt" ]]; then
+    msg_warn "No bootstrap token (Pulse may already be configured); skipping auto-register"
+    return 1
+  fi
+
+  msg_info "Pulse first-time security setup"
+  PULSE_ADMIN_USER="admin"
+  PULSE_ADMIN_PASS="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)Aa1!"
+  PULSE_API_TOKEN="$(openssl rand -hex 32)"
+  local body code
+  body="$(jq -nc --arg u "$PULSE_ADMIN_USER" --arg p "$PULSE_ADMIN_PASS" --arg t "$PULSE_API_TOKEN" \
+        '{username:$u,password:$p,apiToken:$t,enableNotifications:false}')"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+        -H "X-Setup-Token: ${bt}" -H 'Content-Type: application/json' \
+        -d "$body" "${base}/api/security/quick-setup" || echo 000)"
+  if [[ ! "$code" =~ ^2 ]]; then
+    msg_warn "quick-setup HTTP ${code} — leaving Pulse for manual setup"
+    return 1
+  fi
+  save_conf
+  msg_ok "Pulse admin + API token configured"
+
+  # Apply restart so auth/token are active (systemd deployment).
+  curl -s -o /dev/null -X POST -H "X-API-Token: ${PULSE_API_TOKEN}" "${base}/api/security/apply-restart" >/dev/null 2>&1 || true
+  local t=0
+  until curl -fsS "${base}/api/health" >/dev/null 2>&1 || [[ $t -ge 20 ]]; do sleep 2; t=$((t+1)); done
+
+  msg_info "Generating Pulse node setup script"
+  local surl
+  surl="$(curl -s -X POST -H "X-API-Token: ${PULSE_API_TOKEN}" -H 'Content-Type: application/json' \
+        -d '{"type":"pve"}' "${base}/api/setup-script-url" 2>/dev/null)"
+  local sutoken
+  sutoken="$(printf '%s' "$surl" | jq -r '.token // .setupToken // .auth_token // .authToken // empty' 2>/dev/null)"
+  if [[ -z "$sutoken" ]]; then
+    # Some builds return a full URL; try to extract auth_token from it.
+    sutoken="$(printf '%s' "$surl" | grep -oE 'auth_token=[A-Za-z0-9._-]+' | head -1 | cut -d= -f2)"
+  fi
+  if [[ -z "$sutoken" ]]; then
+    msg_warn "Could not obtain a setup token from Pulse — finish node add in the UI"
+    return 1
+  fi
+  msg_ok "Setup token obtained"
+
+  msg_info "Registering this host with Pulse (read-only token)"
+  local setup_sh="/tmp/pmau-pulse-setup.sh"
+  if ! curl -fsSL "${base}/api/setup-script?auth_token=${sutoken}" -o "${setup_sh}" 2>/dev/null; then
+    msg_warn "Could not download setup script — finish node add in the UI"
+    return 1
+  fi
+  # The script creates a PVE monitoring user + PVEAuditor token and calls
+  # /api/auto-register back to Pulse. It runs here, on the PVE host.
+  if bash "${setup_sh}" >/dev/null 2>&1; then
+    rm -f "${setup_sh}"
+    msg_ok "Host registered with Pulse (read-only)"
+    return 0
+  fi
+  msg_warn "Setup script did not complete cleanly — verify in the Pulse UI"
+  rm -f "${setup_sh}"
+  return 1
 }
 
 # ---------------------------------------------------------------------------- #
@@ -325,136 +426,4 @@ EOF
   chmod 700 "${PMAU_UPDATE_BIN}"
 }
 
-push_unattended_upgrades() {
-  msg_info "Enabling unattended-upgrades in Debian/Ubuntu guests"
-  local ctid ostype
-  while read -r ctid; do
-    [[ -z "$ctid" ]] && continue
-    ostype="$(pct config "$ctid" 2>/dev/null | awk -F': ' '/^ostype/{print $2}')"
-    case "$ostype" in
-      debian|ubuntu)
-        pct exec "$ctid" -- bash -c '
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq >/dev/null 2>&1
-          apt-get install -y -qq unattended-upgrades >/dev/null 2>&1
-          cat > /etc/apt/apt.conf.d/20auto-upgrades <<CFG
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-CFG
-          # security updates only; do NOT auto-reboot guests
-          sed -i "s|^//\s*\"\${distro_id}:\${distro_codename}-security\";|        \"\${distro_id}:\${distro_codename}-security\";|" /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true
-        ' >/dev/null 2>&1 || msg_warn "CT ${ctid}: unattended-upgrades step skipped"
-        ;;
-    esac
-  done < <(pct list 2>/dev/null | awk 'NR>1 && $2=="running"{print $1}')
-  msg_ok "unattended-upgrades configured in guests"
-}
-
-install_updater() {
-  write_notify_bin
-  write_update_bin
-
-  local sched
-  sched="$(whiptail --title "$APP" --inputbox \
-"systemd OnCalendar schedule for guest updates:\n\n  Sun 03:00  -> weekly (recommended)\n  daily       -> every day\n  *-*-* 03:00 -> daily at 03:00" \
-14 64 "Sun *-*-* 03:00:00" 3>&1 1>&2 2>&3)" || die "Cancelled."
-
-  cat > /etc/systemd/system/pmau-update.service <<EOF
-[Unit]
-Description=PMAU host-side guest/host maintenance
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${PMAU_UPDATE_BIN}
-EOF
-
-  cat > /etc/systemd/system/pmau-update.timer <<EOF
-[Unit]
-Description=Run PMAU maintenance on a schedule
-
-[Timer]
-OnCalendar=${sched}
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now pmau-update.timer >/dev/null 2>&1
-  msg_ok "Installed pmau-update.timer (${sched})"
-
-  if whiptail --title "$APP" --yesno "Also enable unattended-upgrades (security patches) inside each Debian/Ubuntu guest now?" 10 64; then
-    push_unattended_upgrades
-  fi
-  save_conf
-}
-
-# ---------------------------------------------------------------------------- #
-#  Uninstall
-# ---------------------------------------------------------------------------- #
-uninstall() {
-  whiptail --title "$APP" --yesno "Remove PMAU host components (timer, scripts, conf)?\n\nThis does NOT destroy CT ${PMAU_CTID:-200} or touch your guests." 12 64 || return 0
-  systemctl disable --now pmau-update.timer >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/pmau-update.{service,timer} "${PMAU_UPDATE_BIN}" "${PMAU_NOTIFY_BIN}"
-  systemctl daemon-reload
-  msg_ok "Host components removed (CT and conf left intact)"
-}
-
-# ---------------------------------------------------------------------------- #
-#  Full setup
-# ---------------------------------------------------------------------------- #
-full_setup() {
-  create_ct
-  install_pulse
-  configure_ntfy
-  install_updater
-  whiptail --title "$APP" --msgbox \
-"Setup complete.
-
-Dashboard : http://${PMAU_PULSE_IP:-<ct-ip>}:${PULSE_PORT}
-Updater   : systemctl list-timers pmau-update.timer
-Run now   : ${PMAU_UPDATE_BIN}            (guests + host index)
-Host patch: ${PMAU_UPDATE_BIN} --host     (intentional host upgrade)
-Logs      : ${PMAU_LOG}
-Config    : ${PMAU_CONF}
-
-Reminder: host kernel upgrades are deliberately NOT automated.
-Snapshot/back up before running with --host." 20 72
-}
-
-# ---------------------------------------------------------------------------- #
-#  Main menu
-# ---------------------------------------------------------------------------- #
-main_menu() {
-  while true; do
-    local choice
-    choice="$(whiptail --title "$APP" --menu "Select an action:" 20 70 10 \
-      "1" "Full setup (CT 200 + Pulse + ntfy + updater)" \
-      "2" "Create CT 200 only" \
-      "3" "Install / refresh Pulse in CT 200" \
-      "4" "Configure ntfy notifications" \
-      "5" "Install / update the maintenance timer" \
-      "6" "Run maintenance now (guests + host index)" \
-      "7" "Uninstall host components" \
-      "8" "Quit" \
-      3>&1 1>&2 2>&3)" || exit 0
-    case "$choice" in
-      1) full_setup ;;
-      2) create_ct; msg_ok "CT created. Use option 3 to install Pulse." ;;
-      3) install_pulse ;;
-      4) configure_ntfy ;;
-      5) install_updater ;;
-      6) [[ -x "${PMAU_UPDATE_BIN}" ]] && "${PMAU_UPDATE_BIN}" || die "Updater not installed (option 5 first)." ;;
-      7) uninstall ;;
-      8) exit 0 ;;
-    esac
-  done
-}
-
-# ---------------------------------------------------------------------------- #
-header
-preflight
-main_menu
+push_unattende

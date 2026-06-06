@@ -75,27 +75,20 @@ systemctl list-timers pmau-update.timer
   **not** auto-reboot.
 - The ntfy token and config file are `chmod 600`.
 
-## Connecting Pulse to Proxmox
+## Connecting Pulse to Proxmox (automatic)
 
-After install, open `http://<ct200-ip>:7655`, then in **Settings** add your node
-using a token created at **Datacenter → Permissions → API Tokens**
-(`PVEAuditor` role is sufficient for read-only monitoring).
+The installer registers the host for you. After Pulse comes up it:
 
-## Requirements
+1. reads the one-time bootstrap token from CT 200 (`/etc/pulse/.bootstrap_token`),
+2. runs Pulse's first-time security setup (`POST /api/security/quick-setup`),
+   creating an `admin` login and an API token (both saved to `/etc/pmau/pmau.conf`,
+   `chmod 600`),
+3. mints a one-time setup token (`POST /api/setup-script-url`) and runs Pulse's
+   generated **node setup script** on the host, which creates a **read-only**
+   PVE token (`PVEAuditor`) and calls `POST /api/auto-register`.
 
-- Proxmox VE 8.x or 9.x (tested against 9.2 / Debian 13)
-- Internet access from the host and from CT 200 (template + Pulse + ntfy)
+No root credentials are ever stored in Pulse. When `Full setup` finishes, open
+`http://<ct200-ip>:7655` and the node is already reporting.
 
-## Uninstall
-
-Menu option 7 removes the host components (timer, scripts, config). It does **not**
-destroy CT 200 or modify your guests — remove the container manually with
-`pct stop 200 && pct destroy 200` if you want it gone.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-> Not affiliated with Proxmox Server Solutions GmbH. Pulse is a separate project by
-> [@rcourtman](https://github.com/rcourtman). Review the script before piping it to
-> `bash` — as you should with any helper script.
+**If auto-registration fails** (e.g. Pulse API not ready, or already configured),
+the installer falls back to printing manual steps, and you can retry
