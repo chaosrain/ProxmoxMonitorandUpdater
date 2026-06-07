@@ -614,14 +614,16 @@ marked experimental — expect to tweak. Continue?" 12 72 || return 0
     msg_ok "PVE token ready"
   fi
 
-  msg_info "Installing exporter + Prometheus + Grafana in CT ${PROM_CTID}"
-  pct exec "${PROM_CTID}" -- bash -c "
+  msg_info "Installing exporter + Prometheus + Grafana in CT ${PROM_CTID} (a few minutes; output shown)"
+  echo
+  if pct exec "${PROM_CTID}" -- bash -c "
     set -e
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq python3-venv python3-pip apt-transport-https software-properties-common wget gpg curl tar >/dev/null
+    # gpg + ca-certificates MUST be present before the Grafana key step
+    apt-get install -y -qq gpg ca-certificates curl tar wget python3-venv python3-pip apt-transport-https software-properties-common
     python3 -m venv /opt/pve-exporter
-    /opt/pve-exporter/bin/pip -q install --upgrade pip prometheus-pve-exporter >/dev/null
+    /opt/pve-exporter/bin/pip -q install --upgrade pip prometheus-pve-exporter
     mkdir -p /etc/prometheus
     cat > /etc/prometheus/pve.yml <<CFG
 default:
@@ -685,10 +687,10 @@ CFG
     systemctl daemon-reload
     systemctl enable --now prometheus >/dev/null 2>&1 || true
     mkdir -p /etc/apt/keyrings
-    wget -qO- https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
+    curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
     echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main' > /etc/apt/sources.list.d/grafana.list
     apt-get update -qq
-    apt-get install -y -qq grafana >/dev/null
+    apt-get install -y -qq grafana
     mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
     cat > /etc/grafana/provisioning/datasources/prometheus.yml <<CFG
 apiVersion: 1
@@ -708,11 +710,17 @@ providers:
     options:
       path: /var/lib/grafana/dashboards
 CFG
-    curl -fsSL 'https://grafana.com/api/dashboards/10347/revisions/latest/download' -o /var/lib/grafana/dashboards/proxmox-10347.json 2>/dev/null || true
-    systemctl enable --now grafana-server >/dev/null 2>&1
-  " >/dev/null 2>&1 || msg_warn "Stack install hit an error — check 'pct exec ${PROM_CTID} -- journalctl -xe'"
-  save_conf
-  msg_ok "Prometheus/Grafana stack deployed"
+    curl -fsSL 'https://grafana.com/api/dashboards/10347/revisions/latest/download' -o /var/lib/grafana/dashboards/proxmox-10347.json || true
+    chown -R grafana:grafana /etc/grafana/provisioning /var/lib/grafana/dashboards 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable --now grafana-server
+  "; then
+    save_conf
+    msg_ok "Prometheus/Grafana stack deployed"
+  else
+    save_conf
+    die "Stack install failed in CT ${PROM_CTID} — see the output above. Fix the cause, then destroy CT ${PROM_CTID} (pct stop ${PROM_CTID}; pct destroy ${PROM_CTID}) and re-run option 9."
+  fi
 
   whiptail --title "$APP" --msgbox \
 "Prometheus + Grafana + pve-exporter are in CT ${PROM_CTID}.
