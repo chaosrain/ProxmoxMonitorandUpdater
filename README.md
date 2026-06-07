@@ -17,9 +17,11 @@ monitoring + maintenance control plane on a Proxmox VE host:
 - **ntfy** notifications for every maintenance run
 - **Beszel hub** (optional, menu 8) — lightweight monitoring for non-Proxmox hosts
   (UniFi, NAS, Pis), installed in CT 200 on port 8090
-- **Prometheus + Grafana + pve-exporter** (optional, menu 9, *experimental*) — the
-  historical-metrics power tier in a dedicated CT 201, with the *Proxmox via
-  Prometheus* dashboard auto-provisioned
+- **Prometheus + Grafana + pve-exporter** (optional, menu 9) — the historical-metrics
+  power tier in a dedicated CT 201. Prometheus is installed from its upstream binary
+  (Debian's apt package is being retired); Grafana gets a provisioned Prometheus
+  datasource, and you import the *Proxmox via Prometheus* dashboard (ID 10347) once
+  via the UI (it auto-binds to the datasource)
 
 ## Menu
 
@@ -74,6 +76,33 @@ because that's the only place it physically can.
 | `/etc/pmau/pmau.conf` | saved configuration (chmod 600) |
 | `/var/log/pmau-update.log` | run log |
 | CT 200 | Debian 13 LXC running Pulse on port `7655` |
+
+## Containers & services
+
+PMAU deploys monitoring across two LXC containers. The optional Prometheus tier
+lives in its own container so the heavy, churny stack can be rebuilt without
+touching the always-on Pulse/maintenance control plane.
+
+| CTID | Hostname | Role | Services (port) |
+|------|----------|------|-----------------|
+| **200** | `pmau` | Ops / dashboard control plane | Pulse (`7655`), Beszel hub (`8090`, optional) |
+| **201** | `prom-grafana` | Historical metrics (optional, menu 9) | Grafana (`3000`), Prometheus (`9090`), pve-exporter (`9221`) |
+
+Both are unprivileged Debian 13 LXCs. CT 201's NIC MAC is set from `PROM_MAC` in
+the config so a DHCP reservation can pin its address.
+
+### Deployed instance (CaliMox / ChaosCore)
+
+| Component | Address | Notes |
+|-----------|---------|-------|
+| PVE host `calimox` | `10.0.0.10:8006` | exporter scrape target |
+| CT 200 `pmau` — Pulse | `http://10.0.0.52:7655` | host auto-registered, read-only token |
+| CT 200 `pmau` — Beszel hub | `http://10.0.0.52:8090` | add agents per host via the UI |
+| CT 201 `prom-grafana` — Grafana | `http://10.0.0.53:3000` | import dashboard 10347, datasource Prometheus |
+| CT 201 — Prometheus | `http://10.0.0.53:9090` | scrapes the exporter |
+| CT 201 — pve-exporter | `http://10.0.0.53:9221/pve?target=10.0.0.10:8006` | read-only `pmau-exporter@pve` token |
+
+CT 201 (`10.0.0.53`) is pinned via UCG DHCP reservation to MAC `bc:24:11:05:27:e4`.
 
 ## Usage after install
 
@@ -147,9 +176,9 @@ Your generated Pulse admin password is in `/etc/pmau/pmau.conf` (`PULSE_ADMIN_PA
 
 ## Uninstall
 
-Menu option 7 removes the host components (timer, scripts, config). It does **not**
-destroy CT 200 or modify your guests — remove the container manually with
-`pct stop 200 && pct destroy 200` if you want it gone.
+Menu option 10 removes the host components (timer, scripts, config). It does **not**
+destroy CT 200/201 or modify your guests — remove a container manually with
+`pct stop <ctid> && pct destroy <ctid>` if you want it gone.
 
 ## License
 

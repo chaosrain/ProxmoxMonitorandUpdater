@@ -691,7 +691,10 @@ CFG
     echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main' > /etc/apt/sources.list.d/grafana.list
     apt-get update -qq
     apt-get install -y -qq grafana
-    mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+    # Provision only the datasource. The community dashboard (10347) is imported
+    # via the UI once (file-provisioned copies don't bind cleanly), and with this
+    # default datasource in place it auto-binds on import.
+    mkdir -p /etc/grafana/provisioning/datasources
     cat > /etc/grafana/provisioning/datasources/prometheus.yml <<CFG
 apiVersion: 1
 datasources:
@@ -701,17 +704,7 @@ datasources:
     url: http://127.0.0.1:9090
     isDefault: true
 CFG
-    cat > /etc/grafana/provisioning/dashboards/pmau.yml <<CFG
-apiVersion: 1
-providers:
-  - name: PMAU
-    folder: Proxmox
-    type: file
-    options:
-      path: /var/lib/grafana/dashboards
-CFG
-    curl -fsSL 'https://grafana.com/api/dashboards/10347/revisions/latest/download' -o /var/lib/grafana/dashboards/proxmox-10347.json || true
-    chown -R grafana:grafana /etc/grafana/provisioning /var/lib/grafana/dashboards 2>/dev/null || true
+    chown -R grafana:grafana /etc/grafana/provisioning 2>/dev/null || true
     systemctl daemon-reload
     systemctl enable --now grafana-server
   "; then
@@ -729,11 +722,12 @@ CFG
   Prometheus: http://${PROM_IP}:9090
   Exporter  : http://${PROM_IP}:9221/pve?target=${host_ip}:8006
 
-A 'Proxmox' folder with the imported dashboard should appear in Grafana.
-If the dashboard's datasource is empty, set it to 'Prometheus' once.
+Import a dashboard once via the UI: Dashboards > New > Import > enter 10347
+> Load > select the 'Prometheus' datasource > Import. (The datasource is
+already provisioned, so it auto-binds; set time range to Last 1 hour.)
 
-EXPERIMENTAL: if metrics are missing, verify the exporter token and the
-Prometheus target on the host (${host_ip}:8006)." 19 76
+If metrics are missing, verify the exporter token and the Prometheus
+target on the host (${host_ip}:8006)." 19 76
 }
 
 # ---------------------------------------------------------------------------- #
